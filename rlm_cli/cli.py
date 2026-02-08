@@ -26,7 +26,6 @@ from .loader import (
     GitignoreFilter,
     get_changed_files,
     hash_tree,
-    hash_tree_fast,
     load_baseline,
     load_changed_tree,
     load_source_tree,
@@ -72,6 +71,33 @@ def common_options(f):
                       default="markdown", help="Output format.")(f)
     f = click.option("-v", "--verbose", is_flag=True, help="Show RLM trace output.")(f)
     return f
+
+
+def _run_rlm(cfg, sig, source_tree, rlm_inputs, output_field, task_label, root, verbose=False):
+    """Shared logic: configure LM, build+run RLM, collect cost, format result.
+
+    Returns (formatted_content, cost_info, elapsed, lm, sub_lm).
+    """
+    warn_model_choice(cfg["smart_model"])
+    print_run_header(cfg, root)
+    try:
+        lm, sub_lm = configure_lm(cfg)
+    except Exception as e:
+        click.echo(f"Error configuring LLM: {e}", err=True)
+        sys.exit(EXIT_API_ERROR)
+    click.echo(f"Running {task_label} ...", err=True)
+    t0 = time.time()
+    try:
+        rlm = build_rlm(sig, cfg, sub_lm, source_tree, verbose=verbose)
+        result = rlm(**rlm_inputs)
+    except Exception as e:
+        click.echo(f"Error during {task_label}: {e}", err=True)
+        sys.exit(EXIT_API_ERROR)
+    elapsed = time.time() - t0
+    content = getattr(result, output_field)
+    cost_info = collect_cost(lm, sub_lm)
+    print_cost_summary(cost_info, elapsed)
+    return content, cost_info, elapsed, lm, sub_lm
 
 
 @click.group()
@@ -174,7 +200,11 @@ def config_set(key, value, is_global, project):
         click.echo(f"Unknown key '{key}'. Valid: {', '.join(sorted(valid_keys))}", err=True)
         sys.exit(EXIT_CONFIG_ERROR)
     if key in ("max_iterations", "max_output_chars", "max_llm_calls"):
-        value = int(value)
+        try:
+            value = int(value)
+        except ValueError:
+            click.echo(f"Error: '{key}' must be an integer, got '{value}'.", err=True)
+            sys.exit(EXIT_CONFIG_ERROR)
     if is_global:
         path = DEFAULT_CONFIG_PATH
     elif project:
@@ -254,34 +284,18 @@ def scan(directory, task, output, no_cache, no_gitignore, dry_run, **kwargs):
         print_run_header(cfg, root)
         click.echo(f"\nNo LLM calls made. Use 'rlm-cli tree .' for file list.", err=True)
         return
-    warn_model_choice(cfg["smart_model"])
-    print_run_header(cfg, root)
-    try:
-        lm, sub_lm = configure_lm(cfg)
-    except Exception as e:
-        click.echo(f"Error configuring LLM: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
     sig = TASK_SIGNATURES[task]
     field = TASK_OUTPUT_FIELD[task]
-    click.echo(f"Running {task} analysis ...", err=True)
-    t0 = time.time()
-    try:
-        rlm = build_rlm(sig, cfg, sub_lm, source_tree, verbose=kwargs.get("verbose", False))
-        result = rlm(source_tree=source_tree)
-    except Exception as e:
-        click.echo(f"Error during analysis: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
-    elapsed = time.time() - t0
-    content = getattr(result, field)
-    cost_info = collect_cost(lm, sub_lm)
-    print_cost_summary(cost_info, elapsed)
+    content, cost_info, elapsed, lm, _ = _run_rlm(
+        cfg, sig, source_tree, {"source_tree": source_tree},
+        field, f"{task} analysis", root, verbose=kwargs.get("verbose", False),
+    )
     formatted = format_result(content, cost_info, task, cfg, elapsed, fmt)
     write_output(formatted, output, task, root)
     if kwargs.get("verbose"):
         save_trace(lm, cache, task)
-    tree_h = hash_tree(source_tree)
     if not no_cache:
-        save_baseline(formatted, cache, task, tree_h, cost_info)
+        save_baseline(formatted, cache, task, hash_tree(source_tree), cost_info)
 
 
 @cli.command()
@@ -325,38 +339,23 @@ def refresh(directory, task, since, files_from, output, baseline, no_gitignore, 
     if len(changed) > 15:
         click.echo(f"    ... and {len(changed) - 15} more", err=True)
     changed_tree = load_changed_tree(root, changed)
-    warn_model_choice(cfg["smart_model"])
-    print_run_header(cfg, root)
-    try:
-        lm, sub_lm = configure_lm(cfg)
-    except Exception as e:
-        click.echo(f"Error configuring LLM: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
-    click.echo(f"Running incremental {task} refresh ...", err=True)
-    t0 = time.time()
-    try:
-        rlm = build_rlm(IncrementalRefresh, cfg, sub_lm, changed_tree,
-                         verbose=kwargs.get("verbose", False))
-        result = rlm(previous_analysis=prev, changed_files=changed_tree, task_type=task)
-    except Exception as e:
-        click.echo(f"Error during refresh: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
-    elapsed = time.time() - t0
-    cost_info = collect_cost(lm, sub_lm)
-    print_cost_summary(cost_info, elapsed)
-    content = format_result(result.updated_analysis, cost_info, task, cfg, elapsed, fmt)
-    write_output(content, output, task, root)
-    fast_h = hash_tree_fast(root)
-    if not fast_h:
-        gi = None if no_gitignore else GitignoreFilter(root)
-        full_tree = load_source_tree(root, gi, project_root=root)
-        fast_h = hash_tree(full_tree)
-    save_baseline(content, cache, task, fast_h, cost_info)
+    rlm_inputs = {"previous_analysis": prev, "changed_files": changed_tree, "task_type": task}
+    content, cost_info, elapsed, _, _ = _run_rlm(
+        cfg, IncrementalRefresh, changed_tree, rlm_inputs,
+        "updated_analysis", f"incremental {task} refresh", root,
+        verbose=kwargs.get("verbose", False),
+    )
+    formatted = format_result(content, cost_info, task, cfg, elapsed, fmt)
+    write_output(formatted, output, task, root)
+    gi = None if no_gitignore else GitignoreFilter(root)
+    full_tree = load_source_tree(root, gi, project_root=root)
+    save_baseline(content, cache, task, hash_tree(full_tree), cost_info)
 
 
 @cli.command()
 @click.argument("directory", default=".", type=click.Path(exists=True))
-@click.argument("bug_description")
+@click.option("-d", "--description", "bug_description", required=True,
+              help="Description of the bug to investigate.")
 @click.option("-o", "--output", default=None, type=click.Path(), help="Output file.")
 @click.option("--no-gitignore", is_flag=True, help="Don't respect .gitignore files.")
 @common_options
@@ -369,33 +368,21 @@ def debug(directory, bug_description, output, no_gitignore, **kwargs):
     gi = None if no_gitignore else GitignoreFilter(root)
     click.echo(f"Loading source tree from {root} ...", err=True)
     source_tree = load_source_tree(root, gi, project_root=root)
-    warn_model_choice(cfg["smart_model"])
-    print_run_header(cfg, root)
-    try:
-        lm, sub_lm = configure_lm(cfg)
-    except Exception as e:
-        click.echo(f"Error configuring LLM: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
     desc_preview = bug_description[:80] + ("..." if len(bug_description) > 80 else "")
     click.echo(f"Debugging: {desc_preview}", err=True)
-    t0 = time.time()
-    try:
-        rlm = build_rlm(DebugAnalysis, cfg, sub_lm, source_tree,
-                         verbose=kwargs.get("verbose", False))
-        result = rlm(source_tree=source_tree, bug_description=bug_description)
-    except Exception as e:
-        click.echo(f"Error during debug: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
-    elapsed = time.time() - t0
-    cost_info = collect_cost(lm, sub_lm)
-    print_cost_summary(cost_info, elapsed)
-    content = format_result(result.analysis, cost_info, "debug", cfg, elapsed, fmt)
-    write_output(content, output, "debug", root)
+    content, cost_info, elapsed, _, _ = _run_rlm(
+        cfg, DebugAnalysis, source_tree,
+        {"source_tree": source_tree, "bug_description": bug_description},
+        "analysis", "debug analysis", root, verbose=kwargs.get("verbose", False),
+    )
+    formatted = format_result(content, cost_info, "debug", cfg, elapsed, fmt)
+    write_output(formatted, output, "debug", root)
 
 
 @cli.command()
 @click.argument("directory", default=".", type=click.Path(exists=True))
-@click.argument("question")
+@click.option("-q", "--question", required=True,
+              help="Question to ask about the codebase.")
 @click.option("-o", "--output", default=None, type=click.Path(), help="Output file.")
 @click.option("--no-gitignore", is_flag=True, help="Don't respect .gitignore files.")
 @common_options
@@ -408,28 +395,15 @@ def ask(directory, question, output, no_gitignore, **kwargs):
     gi = None if no_gitignore else GitignoreFilter(root)
     click.echo(f"Loading source tree from {root} ...", err=True)
     source_tree = load_source_tree(root, gi, project_root=root)
-    warn_model_choice(cfg["smart_model"])
-    print_run_header(cfg, root)
-    try:
-        lm, sub_lm = configure_lm(cfg)
-    except Exception as e:
-        click.echo(f"Error configuring LLM: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
     q_preview = question[:80] + ("..." if len(question) > 80 else "")
     click.echo(f"Question: {q_preview}", err=True)
-    t0 = time.time()
-    try:
-        rlm = build_rlm(FreeformQuery, cfg, sub_lm, source_tree,
-                         verbose=kwargs.get("verbose", False))
-        result = rlm(source_tree=source_tree, question=question)
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(EXIT_API_ERROR)
-    elapsed = time.time() - t0
-    cost_info = collect_cost(lm, sub_lm)
-    print_cost_summary(cost_info, elapsed)
-    content = format_result(result.answer, cost_info, "ask", cfg, elapsed, fmt)
-    write_output(content, output, "ask", root)
+    content, cost_info, elapsed, _, _ = _run_rlm(
+        cfg, FreeformQuery, source_tree,
+        {"source_tree": source_tree, "question": question},
+        "answer", "freeform query", root, verbose=kwargs.get("verbose", False),
+    )
+    formatted = format_result(content, cost_info, "ask", cfg, elapsed, fmt)
+    write_output(formatted, output, "ask", root)
 
 
 @cli.command()

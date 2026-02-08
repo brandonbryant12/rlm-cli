@@ -6,6 +6,7 @@ Config precedence (highest wins):
 
 import json
 import os
+import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -33,7 +34,10 @@ def load_json(path: Path) -> dict:
     if path.exists():
         try:
             return json.loads(path.read_text())
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            print(f"Warning: {path} contains invalid JSON, ignoring.", file=sys.stderr)
+            return {}
+        except OSError:
             return {}
     return {}
 

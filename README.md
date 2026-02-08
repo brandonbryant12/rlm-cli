@@ -12,7 +12,7 @@ pip install -e .
 uv pip install -e .
 ```
 
-Requires Python 3.11+ and `dspy>=3.1.2`.
+Requires Python 3.11+ and `dspy>=3.1.3`.
 
 ## Quick start
 
@@ -33,10 +33,10 @@ rlm-cli scan . -t review
 rlm-cli scan . -t documentation
 
 # Debug a specific issue
-rlm-cli debug . "users can't log in after password reset"
+rlm-cli debug . -d "users can't log in after password reset"
 
 # Ask a question about the codebase
-rlm-cli ask . "how does authentication work?"
+rlm-cli ask . -q "how does authentication work?"
 
 # Incremental refresh (only re-analyze changed files)
 rlm-cli refresh . -t security
@@ -72,8 +72,8 @@ rlm-cli config show .
 | `rlm-cli config init/show/set/path` | 0 | Manage configuration |
 | `rlm-cli scan . -t security` | $$$ | Full analysis from scratch |
 | `rlm-cli refresh . -t security` | $ | Incremental update from git diff |
-| `rlm-cli debug . "bug desc"` | $$$ | Root cause analysis |
-| `rlm-cli ask . "question"` | $$ | Freeform codebase Q&A |
+| `rlm-cli debug . -d "bug desc"` | $$$ | Root cause analysis |
+| `rlm-cli ask . -q "question"` | $$ | Freeform codebase Q&A |
 
 ## How it works
 

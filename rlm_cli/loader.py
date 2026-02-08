@@ -29,6 +29,10 @@ SKIP_EXTENSIONS = {
 
 MAX_FILE_SIZE = 256 * 1024
 
+# Sentinel prefix for non-content entries in the source tree.
+# Uses a prefix that cannot appear at the start of any real file content.
+SENTINEL_PREFIX = "\x00RLM:"
+
 
 class GitignoreFilter:
     """Respects .gitignore files at every directory level."""
@@ -155,12 +159,12 @@ def load_source_tree(
             except OSError:
                 continue
             if size > MAX_FILE_SIZE:
-                tree[entry] = f"[FILE TOO LARGE: {size:,} bytes]"
+                tree[entry] = f"{SENTINEL_PREFIX}FILE TOO LARGE: {size:,} bytes"
                 continue
             try:
                 tree[entry] = path.read_text(encoding="utf-8", errors="ignore")
             except Exception as e:
-                tree[entry] = f"[READ ERROR: {e}]"
+                tree[entry] = f"{SENTINEL_PREFIX}READ ERROR: {e}"
 
     return tree
 
@@ -184,14 +188,14 @@ def load_changed_tree(root_dir: Path, changed_files: list[str]) -> dict[str, Any
         except ValueError:
             continue
         if not full_path.exists():
-            tree[rel_path] = "[DELETED]"
+            tree[rel_path] = f"{SENTINEL_PREFIX}DELETED"
             continue
         if full_path.suffix.lower() in SKIP_EXTENSIONS:
             continue
         try:
             tree[rel_path] = full_path.read_text(encoding="utf-8", errors="ignore")
         except Exception as e:
-            tree[rel_path] = f"[READ ERROR: {e}]"
+            tree[rel_path] = f"{SENTINEL_PREFIX}READ ERROR: {e}"
     return tree
 
 

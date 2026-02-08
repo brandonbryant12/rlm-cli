@@ -9,6 +9,8 @@ import re
 from collections import Counter
 from typing import Any, Callable
 
+from .loader import SENTINEL_PREFIX
+
 
 def _flatten(tree: dict, prefix: str = "") -> dict[str, str]:
     """Flatten a nested source tree dict into {path: content}."""
@@ -45,7 +47,7 @@ def make_repl_tools(source_tree: dict[str, Any]) -> list[Callable]:
             return f"Invalid regex: {e}"
         results = []
         for path, content in flat_tree.items():
-            if not isinstance(content, str) or content.startswith("["):
+            if not isinstance(content, str) or content.startswith(SENTINEL_PREFIX):
                 continue
             for i, line in enumerate(content.splitlines(), 1):
                 if compiled.search(line):
@@ -87,7 +89,7 @@ def make_repl_tools(source_tree: dict[str, Any]) -> list[Callable]:
             name = path.rsplit("/", 1)[-1] if "/" in path else path
             ext = "." + name.rsplit(".", 1)[1] if "." in name else "(no ext)"
             ext_counts[ext] += 1
-            if isinstance(content, str) and not content.startswith("["):
+            if isinstance(content, str) and not content.startswith(SENTINEL_PREFIX):
                 lines = content.count("\n") + 1
                 ext_lines[ext] += lines
                 total_lines += lines

@@ -12,6 +12,11 @@ from .tools import make_repl_tools
 
 def configure_lm(cfg: dict) -> tuple:
     """Create and configure the smart and sub language models."""
+    if not cfg.get("api_key") and not cfg.get("api_base_url"):
+        raise click.UsageError(
+            "No API key found. Set ANTHROPIC_API_KEY, RLM_API_KEY, "
+            "or run 'rlm-cli config init --global'."
+        )
     lm_kwargs: dict[str, Any] = {}
     if cfg.get("api_key"):
         lm_kwargs["api_key"] = cfg["api_key"]

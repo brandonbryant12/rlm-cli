@@ -6,7 +6,7 @@ A CLI tool that uses DSPy's Recursive Language Model (`dspy.RLM`) to perform dee
 
 ## Key dependency
 
-`dspy>=3.1.2` — the version where `dspy.RLM` accepts `tools` as `list[Callable]`.
+`dspy>=3.1.3` — the version where `dspy.RLM` accepts `tools` as `list[Callable]` (PR #9247).
 
 ## Architecture
 
