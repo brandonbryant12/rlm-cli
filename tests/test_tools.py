@@ -3,7 +3,8 @@
 import pytest
 
 from rlm_cli.loader import SENTINEL_PREFIX
-from rlm_cli.tools import _flatten, make_repl_tools
+from rlm_cli.loader import flatten_tree
+from rlm_cli.tools import make_repl_tools
 
 
 @pytest.fixture
@@ -53,15 +54,15 @@ def find_imports(tools):
 
 class TestFlatten:
     def test_flat_dict(self):
-        result = _flatten({"a.py": "content"})
+        result = flatten_tree({"a.py": "content"})
         assert result == {"a.py": "content"}
 
     def test_nested_dict(self):
-        result = _flatten({"src": {"app.py": "code"}})
+        result = flatten_tree({"src": {"app.py": "code"}})
         assert result == {"src/app.py": "code"}
 
     def test_deeply_nested(self):
-        result = _flatten({"a": {"b": {"c.py": "x"}}})
+        result = flatten_tree({"a": {"b": {"c.py": "x"}}})
         assert result == {"a/b/c.py": "x"}
 
 

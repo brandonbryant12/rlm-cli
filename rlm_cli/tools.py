@@ -9,25 +9,22 @@ import re
 from collections import Counter
 from typing import Any, Callable
 
-from .loader import SENTINEL_PREFIX
-
-
-def _flatten(tree: dict, prefix: str = "") -> dict[str, str]:
-    """Flatten a nested source tree dict into {path: content}."""
-    flat: dict[str, str] = {}
-    for key, value in tree.items():
-        path = f"{prefix}/{key}" if prefix else key
-        if isinstance(value, dict):
-            flat.update(_flatten(value, path))
-        else:
-            flat[path] = value
-    return flat
+from .loader import SENTINEL_PREFIX, flatten_tree
 
 
 def make_repl_tools(source_tree: dict[str, Any]) -> list[Callable]:
     """Build the tool functions available inside the RLM's REPL."""
 
-    flat_tree = _flatten(source_tree)
+    flat_tree = flatten_tree(source_tree)
+
+    def _lookup(path: str) -> str | None:
+        """Resolve a path to file content, or None if not found/ambiguous."""
+        if path in flat_tree:
+            return flat_tree[path]
+        matches = [p for p in flat_tree if p.endswith(path) or path in p]
+        if len(matches) == 1:
+            return flat_tree[matches[0]]
+        return None
 
     def grep_tree(pattern: str, max_results: int = 50) -> str:
         """Search all files for a regex pattern. Returns matching lines with
@@ -129,11 +126,10 @@ def make_repl_tools(source_tree: dict[str, Any]) -> list[Callable]:
         Returns:
             The file contents, or an error message if not found.
         """
-        if path in flat_tree:
-            return flat_tree[path]
+        content = _lookup(path)
+        if content is not None:
+            return content
         matches = [p for p in flat_tree if p.endswith(path) or path in p]
-        if len(matches) == 1:
-            return flat_tree[matches[0]]
         if matches:
             return f"Ambiguous path. Matches: {', '.join(matches[:10])}"
         return f"File not found: {path}"
@@ -147,9 +143,9 @@ def make_repl_tools(source_tree: dict[str, Any]) -> list[Callable]:
         Returns:
             List of import statements found.
         """
-        content = read_file(file_path)
-        if content.startswith(("File not found", "Ambiguous")):
-            return content
+        content = _lookup(file_path)
+        if content is None:
+            return read_file(file_path)
         imports = []
         for line in content.splitlines():
             s = line.strip()

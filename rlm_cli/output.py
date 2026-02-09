@@ -8,6 +8,8 @@ from typing import Any, Optional
 
 import click
 
+from .loader import flatten_tree
+
 
 def write_output(content: str, output_path: Optional[str], task: str, project_root: Path):
     """Write to a file (resolved relative to project_root) or stdout."""
@@ -73,12 +75,7 @@ def print_cost_summary(cost_info: dict, elapsed: float):
 
 def iter_files(tree: dict, prefix: str = ""):
     """Yield all file paths from a nested source tree."""
-    for key, value in tree.items():
-        path = f"{prefix}/{key}" if prefix else key
-        if isinstance(value, dict):
-            yield from iter_files(value, path)
-        else:
-            yield path
+    yield from flatten_tree(tree, prefix)
 
 
 def tree_summary(tree: dict) -> dict:

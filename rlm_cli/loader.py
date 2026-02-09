@@ -209,6 +209,18 @@ def read_files_from(source: str) -> list[str]:
     return [f.strip() for f in source.split(",") if f.strip()]
 
 
+def flatten_tree(tree: dict, prefix: str = "") -> dict[str, str]:
+    """Flatten a nested source tree dict into {path: content}."""
+    flat: dict[str, str] = {}
+    for key, value in tree.items():
+        path = f"{prefix}/{key}" if prefix else key
+        if isinstance(value, dict):
+            flat.update(flatten_tree(value, path))
+        else:
+            flat[path] = value
+    return flat
+
+
 def hash_tree(tree: dict) -> str:
     content = json.dumps(tree, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()[:12]
