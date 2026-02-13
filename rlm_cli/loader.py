@@ -221,6 +221,196 @@ def flatten_tree(tree: dict, prefix: str = "") -> dict[str, str]:
     return flat
 
 
+def _unflatten_tree(flat: dict[str, str]) -> dict[str, Any]:
+    """Rebuild nested dict from {path: content} (inverse of flatten_tree)."""
+    tree: dict[str, Any] = {}
+    for path, content in flat.items():
+        parts = path.split("/")
+        node = tree
+        for part in parts[:-1]:
+            node = node.setdefault(part, {})
+        node[parts[-1]] = content
+    return tree
+
+
+def _walk_file_stats(
+    root_dir: Path,
+    gitignore_filter: Optional[GitignoreFilter] = None,
+    *,
+    project_root: Optional[Path] = None,
+) -> dict[str, tuple[float, int]]:
+    """Same walk logic as load_source_tree but returns {path: (mtime, size)} without reading."""
+    stats: dict[str, tuple[float, int]] = {}
+    root = root_dir.resolve()
+    boundary = (project_root or root_dir).resolve()
+
+    def _walk(directory: Path, prefix: str) -> None:
+        try:
+            entries = sorted(os.listdir(directory))
+        except PermissionError:
+            return
+        for entry in entries:
+            path = directory / entry
+            try:
+                real = path.resolve()
+                real.relative_to(boundary)
+            except (ValueError, OSError):
+                continue
+            if entry.startswith(".") and entry not in (".env.example",):
+                continue
+            if entry in ALWAYS_SKIP_DIRS:
+                continue
+            if gitignore_filter and gitignore_filter.is_ignored(path):
+                continue
+            rel = f"{prefix}/{entry}" if prefix else entry
+            if path.is_dir():
+                _walk(path, rel)
+            elif path.is_file():
+                if path.suffix.lower() in SKIP_EXTENSIONS:
+                    continue
+                if entry.endswith((".min.js", ".min.css", ".bundle.js")):
+                    continue
+                try:
+                    st = path.stat()
+                    stats[rel] = (st.st_mtime, st.st_size)
+                except OSError:
+                    continue
+
+    _walk(root, "")
+    return stats
+
+
+def save_source_tree_cache(
+    tree: dict[str, Any],
+    cache_dir: Path,
+    root: Path,
+) -> None:
+    """Write source_tree.json + source_tree.manifest.json."""
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    flat = flatten_tree(tree)
+
+    # Build per-file manifest from actual filesystem
+    files_meta: dict[str, dict[str, Any]] = {}
+    root_resolved = root.resolve()
+    for rel_path in flat:
+        full = root_resolved / rel_path
+        try:
+            st = full.stat()
+            files_meta[rel_path] = {"mtime": st.st_mtime, "size": st.st_size}
+        except OSError:
+            files_meta[rel_path] = {"mtime": 0, "size": 0}
+
+    manifest = {
+        "version": 1,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "git_hash": hash_tree_fast(root),
+        "root": str(root_resolved),
+        "files": files_meta,
+    }
+
+    (cache_dir / "source_tree.json").write_text(
+        json.dumps(tree, sort_keys=True), encoding="utf-8",
+    )
+    (cache_dir / "source_tree.manifest.json").write_text(
+        json.dumps(manifest, indent=2), encoding="utf-8",
+    )
+
+
+def load_source_tree_cache(
+    cache_dir: Path,
+) -> tuple[Optional[dict], Optional[dict]]:
+    """Load cached tree + manifest. Returns (None, None) on miss."""
+    tree_path = cache_dir / "source_tree.json"
+    manifest_path = cache_dir / "source_tree.manifest.json"
+    if not tree_path.exists() or not manifest_path.exists():
+        return None, None
+    try:
+        tree = json.loads(tree_path.read_text(encoding="utf-8"))
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        return tree, manifest
+    except (json.JSONDecodeError, OSError):
+        return None, None
+
+
+def load_source_tree_cached(
+    root: Path,
+    cache_dir: Path,
+    gitignore_filter: Optional[GitignoreFilter] = None,
+) -> dict[str, Any]:
+    """Load source tree with caching.
+
+    1. No cache → full load + save cache
+    2. git hash matches → return cached tree instantly
+    3. Otherwise → stat-walk, diff manifest, read only changed files
+    """
+    cached_tree, manifest = load_source_tree_cache(cache_dir)
+
+    if cached_tree is None or manifest is None:
+        click.echo("  (no cache found, full load)", err=True)
+        tree = load_source_tree(root, gitignore_filter, project_root=root)
+        save_source_tree_cache(tree, cache_dir, root)
+        return tree
+
+    # Fast path: git hash unchanged
+    current_git_hash = hash_tree_fast(root)
+    if current_git_hash and current_git_hash == manifest.get("git_hash"):
+        click.echo("  (from cache, unchanged)", err=True)
+        return cached_tree
+
+    # Slow path: stat-walk and diff
+    click.echo("  (checking for changes ...)", err=True)
+    current_stats = _walk_file_stats(root, gitignore_filter, project_root=root)
+    cached_files = manifest.get("files", {})
+
+    changed: list[str] = []
+    new_files: list[str] = []
+    deleted: list[str] = []
+
+    for path, (mtime, size) in current_stats.items():
+        cached = cached_files.get(path)
+        if cached is None:
+            new_files.append(path)
+        elif cached["mtime"] != mtime or cached["size"] != size:
+            changed.append(path)
+
+    for path in cached_files:
+        if path not in current_stats:
+            deleted.append(path)
+
+    total_diff = len(changed) + len(new_files) + len(deleted)
+    if total_diff == 0:
+        click.echo("  (from cache, unchanged)", err=True)
+        save_source_tree_cache(cached_tree, cache_dir, root)
+        return cached_tree
+
+    click.echo(f"  ({total_diff} file(s) changed)", err=True)
+
+    # Patch the cached tree via flatten/unflatten
+    flat = flatten_tree(cached_tree)
+
+    root_resolved = root.resolve()
+    for path in changed + new_files:
+        full = root_resolved / path
+        try:
+            size = full.stat().st_size
+        except OSError:
+            continue
+        if size > MAX_FILE_SIZE:
+            flat[path] = f"{SENTINEL_PREFIX}FILE TOO LARGE: {size:,} bytes"
+            continue
+        try:
+            flat[path] = full.read_text(encoding="utf-8", errors="ignore")
+        except Exception as e:
+            flat[path] = f"{SENTINEL_PREFIX}READ ERROR: {e}"
+
+    for path in deleted:
+        flat.pop(path, None)
+
+    tree = _unflatten_tree(flat)
+    save_source_tree_cache(tree, cache_dir, root)
+    return tree
+
+
 def hash_tree(tree: dict) -> str:
     content = json.dumps(tree, sort_keys=True)
     return hashlib.sha256(content.encode()).hexdigest()[:12]

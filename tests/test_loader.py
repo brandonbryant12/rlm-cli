@@ -8,12 +8,17 @@ import pytest
 from rlm_cli.loader import (
     GitignoreFilter,
     SENTINEL_PREFIX,
+    _unflatten_tree,
+    flatten_tree,
     hash_tree,
     load_baseline,
     load_changed_tree,
     load_source_tree,
+    load_source_tree_cache,
+    load_source_tree_cached,
     read_files_from,
     save_baseline,
+    save_source_tree_cache,
 )
 
 
@@ -254,3 +259,101 @@ class TestReadFilesFrom:
     def test_strips_whitespace(self):
         result = read_files_from("  a.py , b.py  ")
         assert result == ["a.py", "b.py"]
+
+
+class TestUnflattenTree:
+    def test_single_level(self):
+        flat = {"a.py": "x", "b.py": "y"}
+        assert _unflatten_tree(flat) == {"a.py": "x", "b.py": "y"}
+
+    def test_nested(self):
+        flat = {"src/app.py": "code", "src/lib/util.py": "util", "main.py": "main"}
+        tree = _unflatten_tree(flat)
+        assert tree["main.py"] == "main"
+        assert tree["src"]["app.py"] == "code"
+        assert tree["src"]["lib"]["util.py"] == "util"
+
+    def test_roundtrip_with_flatten(self):
+        tree = {"a.py": "1", "src": {"b.py": "2", "sub": {"c.py": "3"}}}
+        assert _unflatten_tree(flatten_tree(tree)) == tree
+
+
+class TestSourceTreeCache:
+    def test_save_and_load_roundtrip(self, sample_project):
+        cache = sample_project / ".rlm-cache"
+        tree = load_source_tree(sample_project, project_root=sample_project)
+        save_source_tree_cache(tree, cache, sample_project)
+
+        loaded_tree, manifest = load_source_tree_cache(cache)
+        assert loaded_tree == tree
+        assert manifest["version"] == 1
+        assert "files" in manifest
+        assert "main.py" in manifest["files"]
+
+    def test_cache_miss_returns_none(self, tmp_path):
+        tree, manifest = load_source_tree_cache(tmp_path / "nonexistent")
+        assert tree is None
+        assert manifest is None
+
+    def test_unchanged_files_use_cache(self, sample_project):
+        cache = sample_project / ".rlm-cache"
+        # First load populates cache
+        tree1 = load_source_tree_cached(sample_project, cache)
+        # Second load should use cache
+        tree2 = load_source_tree_cached(sample_project, cache)
+        assert tree1 == tree2
+
+    def test_modified_file_detected(self, sample_project):
+        cache = sample_project / ".rlm-cache"
+        tree1 = load_source_tree_cached(sample_project, cache)
+        assert tree1["main.py"] == "print('hello')\n"
+
+        # Modify a file (also touch mtime forward to guarantee stat diff)
+        import time
+        time.sleep(0.05)
+        (sample_project / "main.py").write_text("print('changed')\n")
+
+        # Invalidate git hash by clearing it in manifest
+        manifest_path = cache / "source_tree.manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["git_hash"] = ""
+        manifest_path.write_text(json.dumps(manifest))
+
+        tree2 = load_source_tree_cached(sample_project, cache)
+        assert tree2["main.py"] == "print('changed')\n"
+        # Other files unchanged
+        assert tree2["utils.py"] == "def helper(): pass\n"
+
+    def test_new_file_detected(self, sample_project):
+        cache = sample_project / ".rlm-cache"
+        tree1 = load_source_tree_cached(sample_project, cache)
+        assert "new.py" not in flatten_tree(tree1)
+
+        # Add a new file
+        (sample_project / "new.py").write_text("new_content\n")
+
+        # Invalidate git hash
+        manifest_path = cache / "source_tree.manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["git_hash"] = ""
+        manifest_path.write_text(json.dumps(manifest))
+
+        tree2 = load_source_tree_cached(sample_project, cache)
+        assert tree2["new.py"] == "new_content\n"
+
+    def test_deleted_file_detected(self, sample_project):
+        cache = sample_project / ".rlm-cache"
+        tree1 = load_source_tree_cached(sample_project, cache)
+        assert "utils.py" in tree1
+
+        # Delete a file
+        (sample_project / "utils.py").unlink()
+
+        # Invalidate git hash
+        manifest_path = cache / "source_tree.manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        manifest["git_hash"] = ""
+        manifest_path.write_text(json.dumps(manifest))
+
+        tree2 = load_source_tree_cached(sample_project, cache)
+        assert "utils.py" not in tree2

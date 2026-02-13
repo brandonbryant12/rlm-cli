@@ -29,6 +29,7 @@ from .loader import (
     load_baseline,
     load_changed_tree,
     load_source_tree,
+    load_source_tree_cached,
     read_files_from,
     save_baseline,
 )
@@ -70,6 +71,8 @@ def common_options(f):
     f = click.option("--format", "fmt", type=click.Choice(["markdown", "json"]),
                       default="markdown", help="Output format.")(f)
     f = click.option("-v", "--verbose", is_flag=True, help="Show RLM trace output.")(f)
+    f = click.option("--no-tree-cache", is_flag=True,
+                      help="Skip source tree cache (always re-read all files).")(f)
     return f
 
 
@@ -272,7 +275,10 @@ def scan(directory, task, output, no_cache, no_gitignore, dry_run, **kwargs):
     fmt = kwargs.get("fmt", "markdown")
     gi = None if no_gitignore else GitignoreFilter(root)
     click.echo(f"Loading source tree from {root} ...", err=True)
-    source_tree = load_source_tree(root, gi, project_root=root)
+    if kwargs.get("no_tree_cache"):
+        source_tree = load_source_tree(root, gi, project_root=root)
+    else:
+        source_tree = load_source_tree_cached(root, cache, gi)
     stats = tree_summary(source_tree)
     click.echo(
         f"  → {stats['file_count']} files loaded "
@@ -364,10 +370,14 @@ def debug(directory, bug_description, output, no_gitignore, **kwargs):
     root = resolve_project_root(directory)
     cfg = build_cfg(root, **kwargs)
     cfg.setdefault("max_iterations", 35)
+    cache = resolve_cache_dir(root, cfg)
     fmt = kwargs.get("fmt", "markdown")
     gi = None if no_gitignore else GitignoreFilter(root)
     click.echo(f"Loading source tree from {root} ...", err=True)
-    source_tree = load_source_tree(root, gi, project_root=root)
+    if kwargs.get("no_tree_cache"):
+        source_tree = load_source_tree(root, gi, project_root=root)
+    else:
+        source_tree = load_source_tree_cached(root, cache, gi)
     desc_preview = bug_description[:80] + ("..." if len(bug_description) > 80 else "")
     click.echo(f"Debugging: {desc_preview}", err=True)
     content, cost_info, elapsed, _, _ = _run_rlm(
@@ -391,10 +401,14 @@ def ask(directory, question, output, no_gitignore, **kwargs):
     root = resolve_project_root(directory)
     cfg = build_cfg(root, **kwargs)
     cfg.setdefault("max_iterations", 25)
+    cache = resolve_cache_dir(root, cfg)
     fmt = kwargs.get("fmt", "markdown")
     gi = None if no_gitignore else GitignoreFilter(root)
     click.echo(f"Loading source tree from {root} ...", err=True)
-    source_tree = load_source_tree(root, gi, project_root=root)
+    if kwargs.get("no_tree_cache"):
+        source_tree = load_source_tree(root, gi, project_root=root)
+    else:
+        source_tree = load_source_tree_cached(root, cache, gi)
     q_preview = question[:80] + ("..." if len(question) > 80 else "")
     click.echo(f"Question: {q_preview}", err=True)
     content, cost_info, elapsed, _, _ = _run_rlm(
@@ -426,7 +440,7 @@ def status(directory, cache_dir, no_gitignore, fmt):
             click.echo("No cache directory found. Run 'scan' first.")
         return
     gi = None if no_gitignore else GitignoreFilter(root)
-    source_tree = load_source_tree(root, gi, project_root=root)
+    source_tree = load_source_tree_cached(root, cache, gi)
     current_hash = hash_tree(source_tree)
     baselines = []
     for meta_file in sorted(cache.glob("*.meta.json")):
